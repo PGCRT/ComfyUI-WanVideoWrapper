@@ -27,6 +27,11 @@ def set_transformer_cache_method(transformer, timesteps, cache_args=None):
         transformer.easycache_start_step = cache_args["start_step"]
         transformer.easycache_end_step = len(timesteps)-1 if cache_args["end_step"] == -1 else cache_args["end_step"]
         transformer.easycache_thresh = cache_args["easycache_thresh"]
+        transformer.easycache_ret_steps = cache_args.get("ret_steps", 7)
+        transformer.easycache_state.reset_global_state(
+            len(timesteps), 
+            transformer.easycache_ret_steps
+        )
     return transformer
 
 class TeaCacheState:
@@ -36,7 +41,6 @@ class TeaCacheState:
         self._next_pred_id = 0
     
     def new_prediction(self, cache_device='cpu'):
-        """Create new prediction state and return its ID"""
         self.cache_device = cache_device
         pred_id = self._next_pred_id
         self._next_pred_id += 1
@@ -49,7 +53,6 @@ class TeaCacheState:
         return pred_id
     
     def update(self, pred_id, **kwargs):
-        """Update state for specific prediction"""
         if pred_id not in self.states:
             return None
         for key, value in kwargs.items():
@@ -69,7 +72,6 @@ class MagCacheState:
         self._next_pred_id = 0
     
     def new_prediction(self, cache_device='cpu'):
-        """Create new prediction state and return its ID"""
         self.cache_device = cache_device
         pred_id = self._next_pred_id
         self._next_pred_id += 1
@@ -83,7 +85,6 @@ class MagCacheState:
         return pred_id
     
     def update(self, pred_id, **kwargs):
-        """Update state for specific prediction"""
         if pred_id not in self.states:
             return None
         for key, value in kwargs.items():
@@ -101,9 +102,22 @@ class EasyCacheState:
         self.cache_device = cache_device
         self.states = {}
         self._next_pred_id = 0
+        self.global_state = {
+            'cnt': 0,
+            'num_steps': 0,
+            'accumulated_error_even': 0,
+            'should_calc_current_pair': True,
+            'k': None,
+            'previous_raw_input_even': None,
+            'previous_raw_output_even': None,
+            'previous_raw_output_odd': None,
+            'prev_prev_raw_input_even': None,
+            'cache_even': None,
+            'cache_odd': None,
+            'ret_steps': 0,
+        }
 
     def new_prediction(self, cache_device='cpu'):
-        """Create a new prediction state and return its ID."""
         self.cache_device = cache_device
         pred_id = self._next_pred_id
         self._next_pred_id += 1
@@ -117,8 +131,23 @@ class EasyCacheState:
         }
         return pred_id
 
+    def reset_global_state(self, num_steps, ret_steps):
+        self.global_state = {
+            'cnt': 0,
+            'num_steps': num_steps * 2,
+            'accumulated_error_even': 0,
+            'should_calc_current_pair': True,
+            'k': None,
+            'previous_raw_input_even': None,
+            'previous_raw_output_even': None,
+            'previous_raw_output_odd': None,
+            'prev_prev_raw_input_even': None,
+            'cache_even': None,
+            'cache_odd': None,
+            'ret_steps': ret_steps * 2,
+        }
+
     def update(self, pred_id, **kwargs):
-        """Update state for a specific prediction."""
         if pred_id not in self.states:
             return None
         for key, value in kwargs.items():
@@ -130,6 +159,20 @@ class EasyCacheState:
     def clear_all(self):
         self.states = {}
         self._next_pred_id = 0
+        self.global_state = {
+            'cnt': 0,
+            'num_steps': 0,
+            'accumulated_error_even': 0,
+            'should_calc_current_pair': True,
+            'k': None,
+            'previous_raw_input_even': None,
+            'previous_raw_output_even': None,
+            'previous_raw_output_odd': None,
+            'prev_prev_raw_input_even': None,
+            'cache_even': None,
+            'cache_odd': None,
+            'ret_steps': 0,
+        }
 
 def relative_l1_distance(last_tensor, current_tensor):
     l1_distance = torch.abs(last_tensor.to(current_tensor.device) - current_tensor).mean()

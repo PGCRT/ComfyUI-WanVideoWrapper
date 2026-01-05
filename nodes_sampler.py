@@ -31,6 +31,122 @@ rope_functions = ["default", "comfy", "comfy_chunked"]
 VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
 
+    def patch_easycache_moe(transformer, easycache_state, thresh, ret_steps):
+        """Monkey-patch the transformer forward method for EasyCache MOE support"""
+        
+        if not hasattr(transformer, '_original_forward'):
+            transformer._original_forward = transformer.forward
+        
+        def easycache_forward_wrapper(x, t, context, seq_len, **kwargs):
+            """EasyCache forward with MOE support"""
+            global_state = easycache_state.global_state
+            
+            if isinstance(x, list):
+                raw_input = [u.clone() for u in x]
+            else:
+                raw_input = x.clone()
+            
+            is_even = (global_state['cnt'] % 2 == 0)
+            
+            if is_even:
+                if global_state['cnt'] < global_state['ret_steps'] or \
+                   global_state['cnt'] >= (global_state['num_steps'] - 2):
+                    global_state['should_calc_current_pair'] = True
+                    global_state['accumulated_error_even'] = 0
+                else:
+                    if global_state['previous_raw_input_even'] is not None:
+                        if isinstance(raw_input, list):
+                            raw_input_change = torch.cat([
+                                (u - v).flatten() for u, v in 
+                                zip(raw_input, global_state['previous_raw_input_even'])
+                            ]).abs().mean()
+                        else:
+                            raw_input_change = (raw_input - global_state['previous_raw_input_even']).abs().mean()
+                        
+                        if global_state['k'] is not None:
+                            if isinstance(global_state['previous_raw_output_even'], list):
+                                output_norm = torch.cat([
+                                    u.flatten() for u in global_state['previous_raw_output_even']
+                                ]).abs().mean()
+                            else:
+                                output_norm = global_state['previous_raw_output_even'].abs().mean()
+                            pred_change = global_state['k'] * (raw_input_change / output_norm)
+                            global_state['accumulated_error_even'] += pred_change
+                            
+                            if global_state['accumulated_error_even'] < thresh:
+                                global_state['should_calc_current_pair'] = False
+                            else:
+                                global_state['should_calc_current_pair'] = True
+                                global_state['accumulated_error_even'] = 0
+                        else:
+                            global_state['should_calc_current_pair'] = True
+                    else:
+                        global_state['should_calc_current_pair'] = True
+                
+                if isinstance(raw_input, list):
+                    global_state['previous_raw_input_even'] = [u.clone() for u in raw_input]
+                else:
+                    global_state['previous_raw_input_even'] = raw_input.clone()
+            
+            if is_even and not global_state['should_calc_current_pair'] and \
+               global_state['cache_even'] is not None:
+                global_state['cnt'] += 1
+                if isinstance(raw_input, list):
+                    return [(u + v).float() for u, v in zip(raw_input, global_state['cache_even'])]
+                else:
+                    return (raw_input + global_state['cache_even']).float()
+            elif not is_even and not global_state['should_calc_current_pair'] and \
+                 global_state['cache_odd'] is not None:
+                global_state['cnt'] += 1
+                if isinstance(raw_input, list):
+                    return [(u + v).float() for u, v in zip(raw_input, global_state['cache_odd'])]
+                else:
+                    return (raw_input + global_state['cache_odd']).float()
+            
+            output = transformer._original_forward(x, t, context, seq_len, **kwargs)
+            
+            if is_even:
+                if global_state['previous_raw_output_even'] is not None:
+                    if isinstance(output, list):
+                        output_change = torch.cat([
+                            (u - v).flatten() for u, v in 
+                            zip(output, global_state['previous_raw_output_even'])
+                        ]).abs().mean()
+                    else:
+                        output_change = (output - global_state['previous_raw_output_even']).abs().mean()
+                    
+                    if global_state['prev_prev_raw_input_even'] is not None:
+                        if isinstance(global_state['previous_raw_input_even'], list):
+                            input_change = torch.cat([
+                                (u - v).flatten() for u, v in 
+                                zip(global_state['previous_raw_input_even'], 
+                                    global_state['prev_prev_raw_input_even'])
+                            ]).abs().mean()
+                        else:
+                            input_change = (global_state['previous_raw_input_even'] - 
+                                          global_state['prev_prev_raw_input_even']).abs().mean()
+                        global_state['k'] = output_change / input_change
+                
+                global_state['prev_prev_raw_input_even'] = global_state['previous_raw_input_even']
+                if isinstance(output, list):
+                    global_state['previous_raw_output_even'] = [u.clone() for u in output]
+                    global_state['cache_even'] = [u - v for u, v in zip(output, raw_input)]
+                else:
+                    global_state['previous_raw_output_even'] = output.clone()
+                    global_state['cache_even'] = output - raw_input
+            else:
+                if isinstance(output, list):
+                    global_state['previous_raw_output_odd'] = [u.clone() for u in output]
+                    global_state['cache_odd'] = [u - v for u, v in zip(output, raw_input)]
+                else:
+                    global_state['previous_raw_output_odd'] = output.clone()
+                    global_state['cache_odd'] = output - raw_input
+            
+            global_state['cnt'] += 1
+            return output if not isinstance(output, list) else [u.float() for u in output]
+        
+        transformer.forward = easycache_forward_wrapper
+
 
 class WanVideoSampler:
     @classmethod
@@ -876,10 +992,20 @@ class WanVideoSampler:
         # Initialize Cache if enabled
         previous_cache_states = None
         transformer.enable_teacache = transformer.enable_magcache = transformer.enable_easycache = False
-        cache_args = teacache_args if teacache_args is not None else cache_args #for backward compatibility on old workflows
         if cache_args is not None:
             from .cache_methods.cache_methods import set_transformer_cache_method
             transformer = set_transformer_cache_method(transformer, timesteps, cache_args)
+            
+            if cache_args["cache_type"] == "EasyCache":
+                is_moe = hasattr(transformer, 'low_noise_model') and hasattr(transformer, 'high_noise_model')
+                if is_moe:
+                    log.info("Detected MOE model (WAN 2.2), applying EasyCache MOE patches")
+                    patch_easycache_moe(
+                        transformer, 
+                        transformer.easycache_state, 
+                        transformer.easycache_thresh,
+                        transformer.easycache_ret_steps
+                    )
 
             # Initialize cache state
             if samples is not None:

@@ -90,6 +90,7 @@ class WanVideoEasyCache:
                 "easycache_thresh": ("FLOAT", {"default": 0.015, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "How strongly to cache the output of diffusion model. This value must be non-negative."}),
                 "start_step": ("INT", {"default": 10, "min": 0, "max": 9999, "step": 1, "tooltip": "Step to start applying EasyCache"}),
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 9999, "step": 1, "tooltip": "Step to end applying EasyCache"}),
+                "ret_steps": ("INT", {"default": 7, "min": 1, "max": 50, "step": 1, "tooltip": "Number of initial steps to always compute (not cache)"}),
                 "cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
             },
         }
@@ -98,9 +99,9 @@ class WanVideoEasyCache:
     FUNCTION = "setargs"
     CATEGORY = "WanVideoWrapper"
     EXPERIMENTAL = True
-    DESCRIPTION = "EasyCache for WanVideoWrapper, source https://github.com/H-EmbodVis/EasyCache"
+    DESCRIPTION = "EasyCache for WanVideoWrapper, source https://github.com/H-EmbodVis/EasyCache. Includes MOE model support for WAN 2.2"
 
-    def setargs(self, easycache_thresh, start_step, end_step, cache_device):
+    def setargs(self, easycache_thresh, start_step, end_step, ret_steps, cache_device):
         if cache_device == "main_device":
             cache_device = mm.get_torch_device()
         else:
@@ -111,6 +112,7 @@ class WanVideoEasyCache:
             "easycache_thresh": easycache_thresh,
             "start_step": start_step,
             "end_step": end_step,
+            "ret_steps": ret_steps,
             "cache_device": cache_device,
         }
         return (cache_args,)
